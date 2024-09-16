@@ -95,6 +95,7 @@ async fn auth(data: web::Data<AppState>, params: web::Query<AuthRequest>) -> Htt
 async fn main() {
     dotenv::dotenv().ok();
 
+    println!("Visit the following URL in your browser: http://127.0.0.1:5000");
     HttpServer::new(move || {
         let google_client_id = ClientId::new(
             env::var("GOOGLE_CLIENT_ID")
@@ -120,6 +121,7 @@ async fn main() {
             RedirectUrl::new("http://127.0.0.1:5000/auth".to_string())
                 .expect("Invalid redirect URL"),
         );
+
         App::new()
             .app_data(web::Data::new(AppState { oauth }))
             .service(index)
