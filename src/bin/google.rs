@@ -1,21 +1,16 @@
-use std::env;
-
-use actix_web::{get, http::header, web, App, HttpResponse, HttpServer};
-use oauth2::{
-    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
-    PkceCodeChallenge, RedirectUrl, Scope, TokenUrl,
+use actix_web::{
+    get,
+    http::header,
+    web::{Data, Query},
+    App, HttpResponse, HttpServer,
 };
-use serde::Deserialize;
+
+use actix_web_oauth2::{AuthRequest, OAuth};
+use oauth2::TokenResponse;
+use tokio::sync::Mutex;
 
 struct AppState {
-    oauth: BasicClient,
-}
-
-#[derive(Deserialize)]
-pub struct AuthRequest {
-    code: String,
-    state: String,
-    scope: String,
+    oauth: Mutex<OAuth>,
 }
 
 #[get("/")]
@@ -35,27 +30,10 @@ async fn index() -> HttpResponse {
 }
 
 #[get("/login")]
-async fn login(data: web::Data<AppState>) -> HttpResponse {
-    // Google supports Proof Key for Code Exchange (PKCE - https://oauth.net/2/pkce/).
-    // Create a PKCE code verifier and SHA-256 encode it as a code challenge.
-    let (pkce_code_challenge, _pkce_code_verifier) = PkceCodeChallenge::new_random_sha256();
-
-    // Generate the authorization URL to which we'll redirect the user.
-    let (authorize_url, _csrf_state) = &data
-        .oauth
-        .authorize_url(CsrfToken::new_random)
-        // This example is requesting access to the "calendar" features and the user's profile.
-        .add_scope(Scope::new(
-            "https://www.googleapis.com/auth/calendar".to_string(),
-        ))
-        .add_scope(Scope::new(
-            "https://www.googleapis.com/auth/plus.me".to_string(),
-        ))
-        .set_pkce_challenge(pkce_code_challenge)
-        .url();
-
+async fn login(data: Data<AppState>) -> HttpResponse {
+    let auth_url = data.oauth.lock().await.auth_url();
     HttpResponse::Found()
-        .append_header((header::LOCATION, authorize_url.to_string()))
+        .append_header((header::LOCATION, auth_url.to_string()))
         .finish()
 }
 
@@ -67,13 +45,14 @@ async fn logout() -> HttpResponse {
 }
 
 #[get("/auth")]
-async fn auth(data: web::Data<AppState>, params: web::Query<AuthRequest>) -> HttpResponse {
-    let code = AuthorizationCode::new(params.code.clone());
-    let state = CsrfToken::new(params.state.clone());
-    let _scope = params.scope.clone();
-
-    // Exchange the code with a token.
-    let token = &data.oauth.exchange_code(code);
+async fn auth(data: Data<AppState>, Query(params): Query<AuthRequest>) -> HttpResponse {
+    let (state, token) = data
+        .oauth
+        .lock()
+        .await
+        .auth(params)
+        .await
+        .expect("Failed to get token");
 
     let html = format!(
         r#"<html>
@@ -92,46 +71,26 @@ async fn auth(data: web::Data<AppState>, params: web::Query<AuthRequest>) -> Htt
 }
 
 #[actix_web::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
     println!("Visit the following URL in your browser: http://127.0.0.1:5000");
-    HttpServer::new(move || {
-        let google_client_id = ClientId::new(
-            env::var("GOOGLE_CLIENT_ID")
-                .expect("Missing the GOOGLE_CLIENT_ID environment variable."),
-        );
-        let google_client_secret = ClientSecret::new(
-            env::var("GOOGLE_CLIENT_SECRET")
-                .expect("Missing the GOOGLE_CLIENT_SECRET environment variable."),
-        );
-        let auth_url = AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
-            .expect("Invalid authorization endpoint URL");
-        let token_url = TokenUrl::new("https://www.googleapis.com/oauth2/v3/token".to_string())
-            .expect("Invalid token endpoint URL");
+    Ok(HttpServer::new(move || {
+        let google_client_id = std::env::var("GOOGLE_CLIENT_ID")
+            .expect("Missing the GOOGLE_CLIENT_ID environment variable.");
+        let google_client_secret = std::env::var("GOOGLE_CLIENT_SECRET")
+            .expect("Missing the GOOGLE_CLIENT_SECRET environment variable.");
 
-        // Set up the config for the Google OAuth2 process.
-        let oauth = BasicClient::new(
-            google_client_id,
-            Some(google_client_secret),
-            auth_url,
-            Some(token_url),
-        )
-        .set_redirect_uri(
-            RedirectUrl::new("http://127.0.0.1:5000/auth".to_string())
-                .expect("Invalid redirect URL"),
-        );
+        let oauth = OAuth::new(google_client_id, google_client_secret).into();
 
         App::new()
-            .app_data(web::Data::new(AppState { oauth }))
+            .app_data(Data::new(AppState { oauth }))
             .service(index)
             .service(login)
             .service(logout)
             .service(auth)
     })
-    .bind(("127.0.0.1", 5000))
-    .unwrap()
+    .bind(("127.0.0.1", 5000))?
     .run()
-    .await
-    .unwrap();
+    .await?)
 }
